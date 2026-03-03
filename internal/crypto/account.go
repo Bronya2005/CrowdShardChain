@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"strings"
+
+	"CrowdShardChain/internal/hash"
 )
 
 // Ed25519 公钥长度固定 32，签名长度固定 64。
@@ -52,7 +54,7 @@ func AddressFromPublicKey(pubKey []byte) ([]byte, error) {
 	if len(pubKey) != PublicKeySize {
 		return nil, errors.New("生成地址失败：公钥长度不正确")
 	}
-	h := Sum256(pubKey)
+	h := hash.Sum256(pubKey)
 	var addr [20]byte
 	copy(addr[:], h[:20])
 	return addr[:], nil

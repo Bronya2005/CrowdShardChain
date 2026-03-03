@@ -1,4 +1,4 @@
-package crypto
+package hash
 
 import (
 	"crypto/sha256"
@@ -58,4 +58,8 @@ func ParseHash256Hex(s string) (Hash256, error) {
 		return Hash256{}, errors.New("ParseHash256Hex 失败：hex 非法")
 	}
 	return Hash256FromBytes(b)
+}
+
+func BytesToHex(b []byte) string {
+	return hex.EncodeToString(b)
 }
