@@ -2,6 +2,7 @@ package hash
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"strings"
@@ -45,6 +46,16 @@ func (h Hash256) Bytes() []byte {
 // Hex 返回小写 hex。
 func (h Hash256) Hex() string {
 	return hex.EncodeToString(h[:])
+}
+
+func HomeShard(addr20 [20]byte, numShards uint32) (uint32, error) {
+	// 计算地址的 home shard：hash(addr20) % numShards
+	if numShards == 0 {
+		return 0, errors.New("HomeShard失败：numShards 为 0")
+	}
+	h := Sum256(addr20[:])
+	u := binary.BigEndian.Uint64(h[0:8])
+	return uint32(u % uint64(numShards)), nil
 }
 
 // ParseHash256Hex 从 64 位 hex 字符串解析 Hash256。
