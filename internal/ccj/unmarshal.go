@@ -8,6 +8,8 @@ import (
 	"io"
 	"reflect"
 	"strconv"
+
+	"CrowdShardChain/internal/hash"
 )
 
 // Unmarshal 将 CCJ JSON 自动注入到 out。
@@ -134,7 +136,6 @@ func readObjectStrict(dec *json.Decoder) (any, error) {
 }
 
 // parseStrictInt64：只允许十进制整数（禁止小数/科学计数/前导+/-0/前导零）
-// 允许：0, 1, -1, 9223372036854775807, -9223372036854775808
 func parseStrictInt64(s string) (int64, error) {
 	if s == "" {
 		return 0, errors.New("整数格式错误：为空")
@@ -239,13 +240,24 @@ func inject(dst reflect.Value, v any) error {
 		return nil
 
 	case reflect.Slice:
+		if dst.Type().Elem().Kind() == reflect.Uint8 {
+			s, ok := v.(string)
+			if !ok {
+				return typeMismatch(dst, v)
+			}
+			b, err := hash.HexToBytes(s)
+			if err != nil {
+				return err
+			}
+			out := reflect.MakeSlice(dst.Type(), len(b), len(b))
+			reflect.Copy(out, reflect.ValueOf(b))
+			dst.Set(out)
+			return nil
+		}
+
 		arr, ok := v.([]any)
 		if !ok {
 			return typeMismatch(dst, v)
-		}
-		// 明确不支持 []byte（让上层用 string）
-		if dst.Type().Elem().Kind() == reflect.Uint8 {
-			return errors.New("不支持注入到 []byte：请使用字符串字段表示（例如 hex 字符串）")
 		}
 		out := reflect.MakeSlice(dst.Type(), len(arr), len(arr))
 		for i := 0; i < len(arr); i++ {
@@ -257,16 +269,30 @@ func inject(dst reflect.Value, v any) error {
 		return nil
 
 	case reflect.Array:
+		if dst.Type().Elem().Kind() == reflect.Uint8 {
+			s, ok := v.(string)
+			if !ok {
+				return typeMismatch(dst, v)
+			}
+			b, err := hash.HexToBytes(s)
+			if err != nil {
+				return err
+			}
+			if len(b) != dst.Len() {
+				return fmt.Errorf("byte array 长度不匹配：目标=%d 输入=%d", dst.Len(), len(b))
+			}
+			for i := 0; i < dst.Len(); i++ {
+				dst.Index(i).SetUint(uint64(b[i]))
+			}
+			return nil
+		}
+
 		arr, ok := v.([]any)
 		if !ok {
 			return typeMismatch(dst, v)
 		}
 		if len(arr) != dst.Len() {
 			return fmt.Errorf("数组长度不匹配：目标=%d 输入=%d", dst.Len(), len(arr))
-		}
-		// 同样不支持 [N]byte
-		if dst.Type().Elem().Kind() == reflect.Uint8 {
-			return errors.New("不支持注入到 [N]byte：请使用字符串字段表示")
 		}
 		for i := 0; i < len(arr); i++ {
 			if err := inject(dst.Index(i), arr[i]); err != nil {
@@ -280,19 +306,56 @@ func inject(dst reflect.Value, v any) error {
 		if !ok {
 			return typeMismatch(dst, v)
 		}
-		if dst.Type().Key().Kind() != reflect.String {
-			return errors.New("map key 必须是 string：" + dst.Type().String())
+
+		kt := dst.Type().Key()
+		et := dst.Type().Elem()
+
+		// 1) map[string]T（原样）
+		if kt.Kind() == reflect.String {
+			if dst.IsNil() {
+				dst.Set(reflect.MakeMapWithSize(dst.Type(), len(obj)))
+			}
+			for k, vv := range obj {
+				ev := reflect.New(et).Elem()
+				if err := inject(ev, vv); err != nil {
+					return fmt.Errorf("map 值注入失败 key=%s：%w", k, err)
+				}
+				dst.SetMapIndex(reflect.ValueOf(k), ev)
+			}
+			return nil
 		}
+
+		// 2) map[[N]byte]T（新增）
+		if !(kt.Kind() == reflect.Array && kt.Elem().Kind() == reflect.Uint8) {
+			return errors.New("map key 必须是 string 或 [N]byte：" + dst.Type().String())
+		}
+
 		if dst.IsNil() {
 			dst.Set(reflect.MakeMapWithSize(dst.Type(), len(obj)))
 		}
-		elemT := dst.Type().Elem()
-		for k, vv := range obj {
-			ev := reflect.New(elemT).Elem()
-			if err := inject(ev, vv); err != nil {
-				return fmt.Errorf("map 值注入失败 key=%s：%w", k, err)
+
+		// 将 obj 的 string key（hex）解码到 [N]byte
+		N := kt.Len()
+		for kHex, vv := range obj {
+			kb, err := hash.HexToBytes(kHex) // 严格小写 hex 解码
+			if err != nil {
+				return fmt.Errorf("map key hex 非法 key=%s：%w", kHex, err)
 			}
-			dst.SetMapIndex(reflect.ValueOf(k), ev)
+			if len(kb) != N {
+				return fmt.Errorf("map key 长度不匹配：目标=%d 输入=%d key=%s", N, len(kb), kHex)
+			}
+
+			// 构造 [N]byte 的 reflect.Value
+			keyArr := reflect.New(kt).Elem()
+			for i := 0; i < N; i++ {
+				keyArr.Index(i).SetUint(uint64(kb[i]))
+			}
+
+			ev := reflect.New(et).Elem()
+			if err := inject(ev, vv); err != nil {
+				return fmt.Errorf("map 值注入失败 key=%s：%w", kHex, err)
+			}
+			dst.SetMapIndex(keyArr, ev)
 		}
 		return nil
 
@@ -304,7 +367,6 @@ func inject(dst reflect.Value, v any) error {
 		return injectStruct(dst, obj)
 
 	case reflect.Interface:
-		// interface{}：直接放入（仍然是受限类型）
 		dst.Set(reflect.ValueOf(v))
 		return nil
 
@@ -316,7 +378,6 @@ func inject(dst reflect.Value, v any) error {
 func injectStruct(dst reflect.Value, obj map[string]any) error {
 	t := dst.Type()
 
-	// jsonName -> fieldIndex
 	nameToIndex := make(map[string]int, t.NumField())
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
@@ -333,8 +394,7 @@ func injectStruct(dst reflect.Value, obj map[string]any) error {
 	for k, vv := range obj {
 		fi, ok := nameToIndex[k]
 		if !ok {
-			// 未知字段：默认忽略
-			continue
+			continue // 未知字段忽略
 		}
 		fv := dst.Field(fi)
 		if !fv.CanSet() {
@@ -348,6 +408,5 @@ func injectStruct(dst reflect.Value, obj map[string]any) error {
 }
 
 func typeMismatch(dst reflect.Value, v any) error {
-	// v 的类型只会是 nil/bool/string/int64/[]any/map[string]any
 	return fmt.Errorf("类型不匹配：目标=%s 输入类型=%T", dst.Type().String(), v)
 }

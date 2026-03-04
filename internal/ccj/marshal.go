@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+
+	"CrowdShardChain/internal/hash"
 )
 
 // Marshal 将 Go 值编码为 CCJ canonical JSON
@@ -17,7 +19,8 @@ import (
 // - string
 // - int / int8 / int16 / int32 / int64
 // - uint / uint8 / uint16 / uint32 / uint64 / uintptr（必须 <= MaxInt64）
-// - slice / array（注意：不支持 []byte，避免隐式规则；请在上层显式用 hex string 表示）
+// - []byte / [N]byte（编码为小写 hex string）
+// - slice / array（除 byte 外）
 // - map[string]T
 // - struct（读取 json tag，支持 omitempty）
 //
@@ -68,7 +71,7 @@ func fromGo(rv reflect.Value) (any, error) {
 
 	case reflect.Slice:
 		if rv.Type().Elem().Kind() == reflect.Uint8 {
-			return nil, errors.New("不支持 []byte：请使用字符串字段表示")
+			return hash.BytesToHex(rv.Bytes()), nil
 		}
 		n := rv.Len()
 		arr := make([]any, 0, n)
@@ -83,7 +86,12 @@ func fromGo(rv reflect.Value) (any, error) {
 
 	case reflect.Array:
 		if rv.Type().Elem().Kind() == reflect.Uint8 {
-			return nil, errors.New("不支持 [N]byte：请使用字符串字段表示")
+			n := rv.Len()
+			tmp := make([]byte, n)
+			for i := 0; i < n; i++ {
+				tmp[i] = byte(rv.Index(i).Uint())
+			}
+			return hash.BytesToHex(tmp), nil
 		}
 		n := rv.Len()
 		arr := make([]any, 0, n)
@@ -97,18 +105,40 @@ func fromGo(rv reflect.Value) (any, error) {
 		return arr, nil
 
 	case reflect.Map:
-		if rv.Type().Key().Kind() != reflect.String {
-			return nil, errors.New("map 的键必须是 string")
+		kt := rv.Type().Key()
+
+		// 允许 map[string]T（原样）
+		// 以及 map[[N]byte]T（key 转 hex string）
+		if kt.Kind() != reflect.String {
+			// 仅额外支持：[N]byte 作为 map key
+			if !(kt.Kind() == reflect.Array && kt.Elem().Kind() == reflect.Uint8) {
+				return nil, errors.New("map 的键必须是 string 或 [N]byte")
+			}
 		}
+
 		obj := make(map[string]any, rv.Len())
 		iter := rv.MapRange()
 		for iter.Next() {
-			k := iter.Key().String()
+			k := iter.Key()
+			var keyStr string
+
+			if kt.Kind() == reflect.String {
+				keyStr = k.String()
+			} else {
+				// [N]byte -> hex string
+				n := k.Len()
+				tmp := make([]byte, n)
+				for i := 0; i < n; i++ {
+					tmp[i] = byte(k.Index(i).Uint())
+				}
+				keyStr = hash.BytesToHex(tmp)
+			}
+
 			val, err := fromGo(iter.Value())
 			if err != nil {
 				return nil, err
 			}
-			obj[k] = val
+			obj[keyStr] = val
 		}
 		return obj, nil
 
@@ -273,9 +303,9 @@ func writeString(w *bytes.Buffer, s string) {
 		default:
 			if c < 0x20 {
 				w.WriteString(`\u00`)
-				const hex = "0123456789abcdef"
-				w.WriteByte(hex[c>>4])
-				w.WriteByte(hex[c&0x0f])
+				const hx = "0123456789abcdef"
+				w.WriteByte(hx[c>>4])
+				w.WriteByte(hx[c&0x0f])
 			} else {
 				w.WriteByte(c)
 			}

@@ -70,7 +70,3 @@ func ParseHash256Hex(s string) (Hash256, error) {
 	}
 	return Hash256FromBytes(b)
 }
-
-func BytesToHex(b []byte) string {
-	return hex.EncodeToString(b)
-}

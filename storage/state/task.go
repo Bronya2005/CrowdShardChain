@@ -38,10 +38,10 @@ type Task struct {
 }
 
 func (s *ShardState) GetTask(taskId32 [32]byte) *Task {
-	task, ok := s.tasks[taskId32]
+	task, ok := s.Tasks[taskId32]
 	if !ok {
 		task = &Task{}
-		s.tasks[taskId32] = task
+		s.Tasks[taskId32] = task
 	}
 	return task
 }

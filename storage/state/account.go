@@ -6,10 +6,10 @@ type account struct {
 }
 
 func (s *ShardState) GetAccount(addr20 [20]byte) *account {
-	acc, ok := s.accounts[addr20]
+	acc, ok := s.Accounts[addr20]
 	if !ok {
 		acc = &account{}
-		s.accounts[addr20] = acc
+		s.Accounts[addr20] = acc
 	}
 	return acc
 }
